@@ -5,6 +5,8 @@ Servicio pequeño para las conversiones que no se pueden hacer bien en el navega
 | Ruta | Qué hace | Motor |
 |---|---|---|
 | `POST /v1/pdf-to-word` | PDF → Word (.docx) de alta calidad: tablas, imágenes, columnas | [pdf2docx](https://github.com/ArtifexSoftware/pdf2docx) + PyMuPDF |
+| `POST /v1/pdf-to-pptx` | PDF → PowerPoint (.pptx) con el texto editable (`mode=editable`) o como imagen exacta (`mode=image`) | PyMuPDF + [python-pptx](https://github.com/scanny/python-pptx) |
+| `POST /v1/pdf-to-xlsx` | PDF → Excel (.xlsx): una hoja por página, con sus tablas (`lang=es` o `en` para leer los números) | PyMuPDF + [openpyxl](https://openpyxl.readthedocs.io) |
 | `POST /v1/office-to-pdf` | Word, Excel, PowerPoint, OpenDocument → PDF | [Gotenberg](https://gotenberg.dev) (LibreOffice) |
 | `GET /health` | Comprobación de que está activo | |
 | `GET /source` | Dónde está el código (licencia AGPL) | |

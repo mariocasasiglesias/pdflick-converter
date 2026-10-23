@@ -3,6 +3,8 @@ API de conversión de PDFlick.
 
 Solo hace las conversiones que no se pueden hacer bien en el navegador:
   POST /v1/pdf-to-word   PDF -> Word (.docx) de alta calidad, con pdf2docx.
+  POST /v1/pdf-to-pptx   PDF -> PowerPoint (.pptx) con el texto editable (convert.py).
+  POST /v1/pdf-to-xlsx   PDF -> Excel (.xlsx), con las tablas de cada página (convert.py).
   POST /v1/office-to-pdf Word, Excel, PowerPoint u OpenDocument -> PDF, con Gotenberg (LibreOffice).
 
 Principios:
@@ -24,9 +26,11 @@ import tempfile
 import time
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+
+from convert import UserError, pdf_to_pptx, pdf_to_xlsx
 
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get('ALLOWED_ORIGINS', 'https://pdflick.app').split(',') if o.strip()]
 MAX_BYTES = int(os.environ.get('MAX_UPLOAD_MB', '25')) * 1024 * 1024
@@ -37,6 +41,8 @@ SOURCE_URL = os.environ.get('SOURCE_URL', '')
 SLOTS = asyncio.Semaphore(int(os.environ.get('CONCURRENCY', '2')))
 
 DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 OFFICE_EXT = {'.doc', '.docx', '.odt', '.rtf', '.xls', '.xlsx', '.ods', '.csv', '.ppt', '.pptx', '.odp'}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -50,10 +56,6 @@ app.add_middleware(
     allow_headers=['*'],
     max_age=86400,
 )
-
-
-class UserError(Exception):
-    """Error que se puede explicar a la persona (se devuelve con su mensaje)."""
 
 
 @app.middleware('http')
@@ -105,9 +107,9 @@ def _pdf_to_docx(data: bytes) -> bytes:
             return f.read()
 
 
-def _worker(conn, fn, data):
+def _worker(conn, fn, args):
     try:
-        conn.send(('ok', fn(data)))
+        conn.send(('ok', fn(*args)))
     except UserError as e:
         conn.send(('user', str(e)))
     except Exception as e:  # noqa: BLE001 - cualquier fallo de la librería se devuelve como error genérico
@@ -119,12 +121,12 @@ def _worker(conn, fn, data):
 # «forkserver» crea cada proceso desde un proceso limpio (no desde el servidor, que tiene hilos),
 # con las librerías de conversión ya cargadas para que cada conversión arranque rápido.
 CTX = mp.get_context('forkserver')
-CTX.set_forkserver_preload(['pymupdf', 'pdf2docx'])
+CTX.set_forkserver_preload(['pymupdf', 'pdf2docx', 'pptx', 'openpyxl', 'convert'])
 
 
-def _run_isolated(fn, data: bytes) -> bytes:
+def _run_isolated(fn, args: tuple) -> bytes:
     parent, child = CTX.Pipe(duplex=False)
-    proc = CTX.Process(target=_worker, args=(child, fn, data), daemon=True)
+    proc = CTX.Process(target=_worker, args=(child, fn, args), daemon=True)
     proc.start()
     child.close()
     try:
@@ -147,10 +149,10 @@ def _run_isolated(fn, data: bytes) -> bytes:
     raise HTTPException(500, 'No se ha podido convertir este PDF.')
 
 
-async def run_isolated(fn, data: bytes) -> bytes:
+async def run_isolated(fn, *args) -> bytes:
     async with SLOTS:
         try:
-            return await asyncio.get_running_loop().run_in_executor(None, _run_isolated, fn, data)
+            return await asyncio.get_running_loop().run_in_executor(None, _run_isolated, fn, args)
         except UserError as e:
             raise HTTPException(422, str(e))
 
@@ -175,6 +177,30 @@ async def pdf_to_word(request: Request, file: UploadFile = File(...)):
         raise HTTPException(415, 'El archivo no es un PDF.')
     docx = await run_isolated(_pdf_to_docx, data)
     return Response(docx, media_type=DOCX, headers={'Cache-Control': 'no-store'})
+
+
+async def read_pdf(request: Request, file: UploadFile) -> bytes:
+    check_origin(request)
+    data = await read_limited(file)
+    if not data.startswith(b'%PDF'):
+        raise HTTPException(415, 'El archivo no es un PDF.')
+    return data
+
+
+@app.post('/v1/pdf-to-pptx')
+async def pdf_to_powerpoint(request: Request, file: UploadFile = File(...), mode: str = Form('editable')):
+    if mode not in ('editable', 'image'):
+        raise HTTPException(400, 'Modo no válido.')
+    data = await read_pdf(request, file)
+    pptx = await run_isolated(pdf_to_pptx, data, mode, MAX_PAGES)
+    return Response(pptx, media_type=PPTX, headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/v1/pdf-to-xlsx')
+async def pdf_to_excel(request: Request, file: UploadFile = File(...), lang: str = Form('es')):
+    data = await read_pdf(request, file)
+    xlsx = await run_isolated(pdf_to_xlsx, data, 'en' if lang == 'en' else 'es', MAX_PAGES)
+    return Response(xlsx, media_type=XLSX, headers={'Cache-Control': 'no-store'})
 
 
 @app.post('/v1/office-to-pdf')

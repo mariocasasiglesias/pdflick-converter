@@ -13,7 +13,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY main.py .
+COPY main.py convert.py ./
 
 USER app
 EXPOSE 8080
